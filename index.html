@@ -2200,180 +2200,114 @@ function sortTable(col) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  CSFLOAT API INTEGRATION — via Vercel Proxy
-//  El browser llama a /api/csfloat (mismo dominio, sin CORS)
-//  El servidor llama a csfloat.com con la API key de forma segura
+//  STEAM MARKET API INTEGRATION — via Vercel Proxy
+//  Sin API key · El proxy llama a Steam desde el servidor
+//  Datos: precio mínimo, precio medio, volumen 24H
 // ══════════════════════════════════════════════════════════════
 
-// Apunta al proxy local de Vercel — sin CORS, sin exponer la API key
-const CSFLOAT_BASE = '/api/csfloat';
-
-// La API key ya NO va acá — se configura en Vercel Dashboard
-// Settings → Environment Variables → CSFLOAT_API_KEY
-const CSFLOAT_API_KEY = ''; // Dejar vacío — la key vive en el servidor
-
-// Items que queremos trackear (market_hash_name exacto de Steam)
+// Items a trackear — nombre exacto del Steam Market
 const TRACKED_ITEMS = [
-  'AK-47 | Redline (Factory New)',
-  'AWP | Dragon Lore (Factory New)',
-  'M4A4 | Howl (Minimal Wear)',
-  'Glock-18 | Fade (Factory New)',
-  'Karambit | Fade (Factory New)',
-  'Recoil Case',
-  'Sport Gloves | Pandora\'s Box (Field-Tested)',
-  'Desert Eagle | Blaze (Factory New)',
-  'USP-S | Kill Confirmed (Minimal Wear)',
-  'AWP | Asiimov (Field-Tested)',
-  'M4A1-S | Printstream (Factory New)',
+  { name:'AK-47 | Redline', steamName:'AK-47 | Redline (Factory New)', idx:0 },
+  { name:'AWP | Dragon Lore', steamName:'AWP | Dragon Lore (Factory New)', idx:1 },
+  { name:'M4A4 | Howl', steamName:'M4A4 | Howl (Minimal Wear)', idx:2 },
+  { name:'Glock-18 | Fade', steamName:'Glock-18 | Fade (Factory New)', idx:3 },
+  { name:'Karambit | Fade', steamName:'Karambit | Fade (Factory New)', idx:4 },
+  { name:'Recoil Case', steamName:'Recoil Case', idx:5 },
+  { name:'Sport Gloves | Pandora\'s Box', steamName:'Sport Gloves | Pandora\'s Box (Field-Tested)', idx:6 },
+  { name:'Desert Eagle | Blaze', steamName:'Desert Eagle | Blaze (Factory New)', idx:7 },
+  { name:'USP-S | Kill Confirmed', steamName:'USP-S | Kill Confirmed (Minimal Wear)', idx:8 },
+  { name:'AWP | Asiimov', steamName:'AWP | Asiimov (Field-Tested)', idx:10 },
+  { name:'M4A1-S | Printstream', steamName:'M4A1-S | Printstream (Factory New)', idx:11 },
 ];
 
-// Cache en memoria para no spamear la API
 let priceCache = {};
 let lastFetch = 0;
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+const CACHE_TTL = 5 * 60 * 1000;
+let apiStatus = 'idle';
 
-// Estado de la UI
-let apiStatus = 'idle'; // idle | loading | success | error
-
-// ── Construir headers con o sin API key
-function buildHeaders() {
-  const h = { 'Content-Type': 'application/json' };
-  if(CSFLOAT_API_KEY) h['Authorization'] = CSFLOAT_API_KEY;
-  return h;
+// ── Parsear precio de Steam ("$28.50" → 28.50)
+function parseSteamPrice(str) {
+  if(!str) return null;
+  return parseFloat(str.replace(/[^0-9.]/g, '')) || null;
 }
 
-// ── Fetch de precio de un item específico via proxy Vercel → CSFloat
-async function fetchItemPrice(marketHashName) {
-  if(priceCache[marketHashName] && (Date.now() - priceCache[marketHashName].ts) < CACHE_TTL) {
-    return priceCache[marketHashName].data;
-  }
-  // Llamamos a nuestro proxy /api/csfloat con _endpoint=/listings
-  const params = new URLSearchParams({
-    _endpoint: '/listings',
-    market_hash_name: marketHashName,
-    type: 'buy_now',
-    sort_by: 'price',
-    order: 'asc',
-    limit: 10,
-  });
-  const res = await fetch(`${CSFLOAT_BASE}?${params}`);
-  if(!res.ok) throw new Error(`CSFloat ${res.status}: ${res.statusText}`);
+// ── Fetch de un item via proxy Vercel → Steam
+async function fetchSteamPrice(item) {
+  const cached = priceCache[item.steamName];
+  if(cached && (Date.now() - cached.ts) < CACHE_TTL) return cached.data;
+
+  const params = new URLSearchParams({ item: item.steamName });
+  const res = await fetch(`/api/prices?${params}`);
+  if(!res.ok) throw new Error(`Steam proxy ${res.status}`);
   const json = await res.json();
-  const data = processPriceData(json, marketHashName);
-  priceCache[marketHashName] = { ts: Date.now(), data };
+  if(!json.success) throw new Error('Steam devolvió success:false');
+
+  const data = {
+    name: item.name,
+    price: parseSteamPrice(json.lowest_price),
+    median: parseSteamPrice(json.median_price),
+    volume: json.volume || '0',
+  };
+  priceCache[item.steamName] = { ts: Date.now(), data };
   return data;
 }
 
-// ── Procesar respuesta de CSFloat y extraer precio mínimo, volumen e imagen
-function processPriceData(json, name) {
-  const listings = json.data || [];
-  if(!listings.length) return null;
-
-  // Precio mínimo (buy now más barato)
-  const minPrice = listings[0]?.price / 100; // CSFloat devuelve centavos
-
-  // Precio promedio de los primeros 10
-  const prices = listings.map(l => l.price / 100);
-  const avgPrice = prices.reduce((a,b) => a+b, 0) / prices.length;
-
-  // Float del item más barato
-  const topFloat = listings[0]?.item?.float_value ?? null;
-
-  // Imagen del item (icon_url de Steam via CSFloat)
-  const img = listings[0]?.item?.icon_url
-    ? `https://community.cloudflare.steamstatic.com/economy/image/${listings[0].item.icon_url}`
-    : null;
-
-  // Rareza
-  const rarity = listings[0]?.item?.rarity ?? null;
-  const rarityMap = {
-    'Contraband':'covert', 'Covert':'covert', 'Classified':'classified',
-    'Restricted':'restricted', 'Mil-Spec Grade':'mil', 'Industrial Grade':'mil',
-    'Consumer Grade':'mil',
-  };
-
-  return {
-    name,
-    price: minPrice,
-    avgPrice,
-    float: topFloat,
-    img,
-    rarity: rarityMap[rarity] || 'mil',
-    rawListings: listings.length,
-    stock: json.total_count || listings.length,
-  };
-}
-
-// ── Fetch masivo de todos los items trackeados (con delay entre requests)
+// ── Fetch masivo con delay para respetar rate limit de Steam
 async function fetchAllPrices() {
   if(apiStatus === 'loading') return;
   if(Date.now() - lastFetch < CACHE_TTL) {
-    showToast('⚡', 'Datos en caché (actualizan en 5 min)');
+    showToast('⚡', 'Datos en caché (se actualizan cada 5 min)');
     return;
   }
 
   apiStatus = 'loading';
   setApiStatusUI('loading');
-  showToast('🔄', 'Obteniendo precios de CSFloat...');
+  showToast('🔄', 'Obteniendo precios de Steam Market...');
 
-  const results = [];
-  const DELAY = 1200; // ms entre requests para respetar rate limit (15/min = 1 cada 4s; usamos 1.2s para ser conservadores)
+  let updated = 0;
+  const DELAY = 1500; // Steam limita ~40 req/min desde un servidor
 
   for(let i = 0; i < TRACKED_ITEMS.length; i++) {
-    const itemName = TRACKED_ITEMS[i];
+    const item = TRACKED_ITEMS[i];
     try {
-      const data = await fetchItemPrice(itemName);
-      if(data) results.push(data);
-      // Actualizar UI progresivamente
-      patchMarketDataFromCSFloat([data]);
+      const data = await fetchSteamPrice(item);
+      if(data && data.price) {
+        // Parchear MARKET_DATA con precio real
+        const prev = MARKET_DATA[item.idx]?.price;
+        MARKET_DATA[item.idx].price = data.price;
+        // Calcular cambio vs precio anterior en cache
+        if(prev && prev !== data.price) {
+          MARKET_DATA[item.idx].h24 = parseFloat((((data.price - prev) / prev) * 100).toFixed(2));
+        }
+        // Volumen real de Steam
+        MARKET_DATA[item.idx].vol = data.volume ? `${data.volume} sold` : MARKET_DATA[item.idx].vol;
+        updated++;
+      }
       updateLoadingProgress(i + 1, TRACKED_ITEMS.length);
     } catch(err) {
-      console.warn(`CSFloat error para "${itemName}":`, err.message);
+      console.warn(`Steam error para "${item.steamName}":`, err.message);
     }
-    // Delay entre requests excepto el último
     if(i < TRACKED_ITEMS.length - 1) await sleep(DELAY);
   }
 
   lastFetch = Date.now();
-  apiStatus = 'success';
-  setApiStatusUI('success');
+  apiStatus = updated > 0 ? 'success' : 'error';
+  setApiStatusUI(apiStatus);
 
-  // Refrescar tablas y listas con datos reales
-  buildMiniLists();
-  buildMarketTable();
-  updateTickerFromData();
-  showToast('✅', `${results.length} precios actualizados desde CSFloat`);
-}
-
-// ── Parchear MARKET_DATA con datos reales de CSFloat
-function patchMarketDataFromCSFloat(csItems) {
-  csItems.forEach(cs => {
-    if(!cs) return;
-    // Buscar por nombre aproximado en MARKET_DATA
-    const idx = MARKET_DATA.findIndex(m =>
-      m.name.toLowerCase().replace(/[^a-z0-9]/g,'').includes(
-        cs.name.split('(')[0].trim().toLowerCase().replace(/[^a-z0-9]/g,'').substring(0,12)
-      )
-    );
-    if(idx !== -1) {
-      const prev = MARKET_DATA[idx].price;
-      MARKET_DATA[idx].price = cs.price || MARKET_DATA[idx].price;
-      // Calcular cambio 24H simulado basado en variación vs precio anterior del cache
-      if(prev && cs.price && prev !== cs.price) {
-        MARKET_DATA[idx].h24 = parseFloat((((cs.price - prev) / prev) * 100).toFixed(2));
-      }
-      if(cs.img) MARKET_DATA[idx].img = cs.img;
-      if(cs.float !== null) MARKET_DATA[idx].float = cs.float;
-      if(cs.stock) MARKET_DATA[idx].stock = cs.stock;
-      MARKET_DATA[idx].vol = cs.rawListings ? `${cs.rawListings} listings` : MARKET_DATA[idx].vol;
-    }
-  });
+  if(updated > 0) {
+    buildMiniLists();
+    buildMarketTable();
+    updateTickerFromData();
+    showToast('✅', `${updated} precios actualizados desde Steam`);
+  } else {
+    showToast('⚠️', 'No se pudieron obtener precios. Reintentá en un momento.');
+  }
 }
 
 // ── Actualizar ticker con precios reales
 function updateTickerFromData() {
   TICKER_ITEMS.forEach((t, i) => {
-    const match = MARKET_DATA.find(m => m.name.split('|')[0].trim() === t.name.split(' ').slice(0,2).join(' '));
+    const match = MARKET_DATA.find(m => m.name.includes(t.name.split(' ')[0]));
     if(match) {
       TICKER_ITEMS[i].price = '$' + match.price.toFixed(2);
       TICKER_ITEMS[i].change = (match.h24 >= 0 ? '+' : '') + match.h24.toFixed(1) + '%';
@@ -2383,7 +2317,7 @@ function updateTickerFromData() {
   buildTicker();
 }
 
-// ── Indicador visual de estado de la API en el navbar
+// ── Indicador de estado en navbar
 function setApiStatusUI(status) {
   let btn = document.getElementById('api-status-btn');
   if(!btn) {
@@ -2395,70 +2329,38 @@ function setApiStatusUI(status) {
     document.querySelector('.nav-actions')?.prepend(btn);
   }
   const states = {
-    idle:    { icon:'◉', text:'CSFloat', color:'var(--text3)' },
+    idle:    { icon:'◉', text:'Steam Prices', color:'var(--text3)' },
     loading: { icon:'⟳', text:'Cargando...', color:'var(--neon)' },
-    success: { icon:'●', text:'CSFloat LIVE', color:'var(--green)' },
-    error:   { icon:'✕', text:'CSFloat Error', color:'var(--red)' },
+    success: { icon:'●', text:'Steam LIVE', color:'var(--green)' },
+    error:   { icon:'✕', text:'Steam Error', color:'var(--red)' },
   };
   const s = states[status] || states.idle;
   btn.innerHTML = `<span style="color:${s.color}">${s.icon}</span> ${s.text}`;
-  if(status === 'loading') btn.style.animation = 'spin 1s linear infinite';
-  else btn.style.animation = '';
+  btn.style.animation = status === 'loading' ? 'spin 1s linear infinite' : '';
 }
 
-// ── Barra de progreso durante la carga
+// ── Barra de progreso
 function updateLoadingProgress(done, total) {
   let bar = document.getElementById('api-progress');
   if(!bar) {
     bar = document.createElement('div');
     bar.id = 'api-progress';
-    bar.style.cssText = `position:fixed;top:62px;left:0;right:0;height:2px;z-index:200;
-      background:var(--border);transition:opacity 0.5s`;
+    bar.style.cssText = `position:fixed;top:62px;left:0;right:0;height:2px;z-index:200;background:var(--border);transition:opacity 0.5s`;
     const fill = document.createElement('div');
     fill.id = 'api-progress-fill';
-    fill.style.cssText = `height:100%;background:linear-gradient(90deg,var(--gold),var(--neon));
-      transition:width 0.4s ease;border-radius:0 2px 2px 0`;
+    fill.style.cssText = `height:100%;background:linear-gradient(90deg,var(--gold),var(--neon));transition:width 0.4s ease;border-radius:0 2px 2px 0`;
     bar.appendChild(fill);
     document.body.appendChild(bar);
   }
   const pct = (done / total * 100).toFixed(0);
   document.getElementById('api-progress-fill').style.width = pct + '%';
-  if(done >= total) setTimeout(() => { bar.style.opacity = '0'; setTimeout(()=>bar.remove(), 500); }, 800);
+  if(done >= total) setTimeout(() => { bar.style.opacity='0'; setTimeout(()=>bar.remove(),500); }, 800);
 }
 
-// ── Fetch de listings activos de un item (para el modal de detalle futuro)
-async function fetchItemListings(marketHashName, limit = 20) {
-  const params = new URLSearchParams({
-    market_hash_name: marketHashName,
-    type: 'buy_now',
-    sort_by: 'price',
-    order: 'asc',
-    limit,
-  });
-  const res = await fetch(`${CSFLOAT_BASE}/listings?${params}`, { headers: buildHeaders() });
-  if(!res.ok) throw new Error(`CSFloat ${res.status}`);
-  return res.json();
-}
-
-// ── Fetch de historial de ventas (para el gráfico de price history)
-// Nota: requiere API key para este endpoint
-async function fetchPriceHistory(marketHashName) {
-  if(!CSFLOAT_API_KEY) {
-    console.warn('fetchPriceHistory requiere API key de CSFloat');
-    return null;
-  }
-  const params = new URLSearchParams({ market_hash_name: marketHashName });
-  const res = await fetch(`${CSFLOAT_BASE}/market/stats?${params}`, { headers: buildHeaders() });
-  if(!res.ok) return null;
-  return res.json();
-}
-
-// ── Utilidad: sleep
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ── CSS para spin animation (agregado dinámicamente)
 const spinStyle = document.createElement('style');
-spinStyle.textContent = `@keyframes spin { from { transform:rotate(0deg) } to { transform:rotate(360deg) } }`;
+spinStyle.textContent = `@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }`;
 document.head.appendChild(spinStyle);
 
 // ── INIT ──────────────────────────────────────────────────────
@@ -2471,10 +2373,10 @@ document.addEventListener('DOMContentLoaded', () => {
   buildOpeningsChart('cases');
   renderFGCard();
 
-  // Inicializar botón de CSFloat en navbar
+  // Inicializar botón Steam en navbar
   setApiStatusUI('idle');
 
-  // Auto-fetch al cargar con datos reales de CSFloat
+  // Auto-fetch precios reales desde Steam
   fetchAllPrices();
 
   // Close modal on backdrop click
