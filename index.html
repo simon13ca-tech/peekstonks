@@ -2200,59 +2200,49 @@ function sortTable(col) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  STEAM MARKET API INTEGRATION — via Vercel Proxy
-//  Sin API key · El proxy llama a Steam desde el servidor
-//  Datos: precio mínimo, precio medio, volumen 24H
+//  SKINPORT API INTEGRATION — directo desde el browser
+//  Sin API key · CORS abierto · No necesita proxy
+//  Docs: https://docs.skinport.com
+//  Endpoint: GET https://api.skinport.com/v1/items?app_id=730&currency=USD
+//  Devuelve TODOS los items de CS2 en un solo request
 // ══════════════════════════════════════════════════════════════
 
-// Items a trackear — nombre exacto del Steam Market
-const TRACKED_ITEMS = [
-  { name:'AK-47 | Redline', steamName:'AK-47 | Redline (Factory New)', idx:0 },
-  { name:'AWP | Dragon Lore', steamName:'AWP | Dragon Lore (Factory New)', idx:1 },
-  { name:'M4A4 | Howl', steamName:'M4A4 | Howl (Minimal Wear)', idx:2 },
-  { name:'Glock-18 | Fade', steamName:'Glock-18 | Fade (Factory New)', idx:3 },
-  { name:'Karambit | Fade', steamName:'Karambit | Fade (Factory New)', idx:4 },
-  { name:'Recoil Case', steamName:'Recoil Case', idx:5 },
-  { name:'Sport Gloves | Pandora\'s Box', steamName:'Sport Gloves | Pandora\'s Box (Field-Tested)', idx:6 },
-  { name:'Desert Eagle | Blaze', steamName:'Desert Eagle | Blaze (Factory New)', idx:7 },
-  { name:'USP-S | Kill Confirmed', steamName:'USP-S | Kill Confirmed (Minimal Wear)', idx:8 },
-  { name:'AWP | Asiimov', steamName:'AWP | Asiimov (Field-Tested)', idx:10 },
-  { name:'M4A1-S | Printstream', steamName:'M4A1-S | Printstream (Factory New)', idx:11 },
+// Nombres exactos en Skinport (market_hash_name de Steam)
+const TRACKED_NAMES = [
+  'AK-47 | Redline (Factory New)',
+  'AWP | Dragon Lore (Factory New)',
+  'M4A4 | Howl (Minimal Wear)',
+  'Glock-18 | Fade (Factory New)',
+  'Karambit | Fade (Factory New)',
+  'Recoil Case',
+  "Sport Gloves | Pandora's Box (Field-Tested)",
+  'Desert Eagle | Blaze (Factory New)',
+  'USP-S | Kill Confirmed (Minimal Wear)',
+  'AWP | Asiimov (Field-Tested)',
+  'M4A1-S | Printstream (Factory New)',
 ];
+
+// Mapeo nombre Skinport → índice en MARKET_DATA
+const NAME_TO_IDX = {
+  'AK-47 | Redline (Factory New)': 0,
+  'AWP | Dragon Lore (Factory New)': 1,
+  'M4A4 | Howl (Minimal Wear)': 2,
+  'Glock-18 | Fade (Factory New)': 3,
+  'Karambit | Fade (Factory New)': 4,
+  'Recoil Case': 5,
+  "Sport Gloves | Pandora's Box (Field-Tested)": 6,
+  'Desert Eagle | Blaze (Factory New)': 7,
+  'USP-S | Kill Confirmed (Minimal Wear)': 8,
+  'AWP | Asiimov (Field-Tested)': 10,
+  'M4A1-S | Printstream (Factory New)': 11,
+};
 
 let priceCache = {};
 let lastFetch = 0;
 const CACHE_TTL = 5 * 60 * 1000;
 let apiStatus = 'idle';
 
-// ── Parsear precio de Steam ("$28.50" → 28.50)
-function parseSteamPrice(str) {
-  if(!str) return null;
-  return parseFloat(str.replace(/[^0-9.]/g, '')) || null;
-}
-
-// ── Fetch de un item via proxy Vercel → Steam
-async function fetchSteamPrice(item) {
-  const cached = priceCache[item.steamName];
-  if(cached && (Date.now() - cached.ts) < CACHE_TTL) return cached.data;
-
-  const params = new URLSearchParams({ item: item.steamName });
-  const res = await fetch(`/api/prices?${params}`);
-  if(!res.ok) throw new Error(`Steam proxy ${res.status}`);
-  const json = await res.json();
-  if(!json.success) throw new Error('Steam devolvió success:false');
-
-  const data = {
-    name: item.name,
-    price: parseSteamPrice(json.lowest_price),
-    median: parseSteamPrice(json.median_price),
-    volume: json.volume || '0',
-  };
-  priceCache[item.steamName] = { ts: Date.now(), data };
-  return data;
-}
-
-// ── Fetch masivo con delay para respetar rate limit de Steam
+// ── Fetch de todos los precios de Skinport en un solo request
 async function fetchAllPrices() {
   if(apiStatus === 'loading') return;
   if(Date.now() - lastFetch < CACHE_TTL) {
@@ -2262,45 +2252,60 @@ async function fetchAllPrices() {
 
   apiStatus = 'loading';
   setApiStatusUI('loading');
-  showToast('🔄', 'Obteniendo precios de Steam Market...');
+  showToast('🔄', 'Obteniendo precios de Skinport...');
+  updateLoadingProgress(1, 3);
 
-  let updated = 0;
-  const DELAY = 1500; // Steam limita ~40 req/min desde un servidor
+  try {
+    // Un solo request trae todos los items — Skinport tiene CORS abierto
+    const res = await fetch('https://api.skinport.com/v1/items?app_id=730&currency=USD', {
+      headers: { 'Accept': 'application/json' }
+    });
 
-  for(let i = 0; i < TRACKED_ITEMS.length; i++) {
-    const item = TRACKED_ITEMS[i];
-    try {
-      const data = await fetchSteamPrice(item);
-      if(data && data.price) {
-        // Parchear MARKET_DATA con precio real
-        const prev = MARKET_DATA[item.idx]?.price;
-        MARKET_DATA[item.idx].price = data.price;
-        // Calcular cambio vs precio anterior en cache
-        if(prev && prev !== data.price) {
-          MARKET_DATA[item.idx].h24 = parseFloat((((data.price - prev) / prev) * 100).toFixed(2));
+    if(!res.ok) throw new Error(`Skinport ${res.status}: ${res.statusText}`);
+    updateLoadingProgress(2, 3);
+
+    const items = await res.json();
+    updateLoadingProgress(3, 3);
+
+    // Construir lookup rápido por market_hash_name
+    const byName = {};
+    items.forEach(item => { byName[item.market_hash_name] = item; });
+
+    let updated = 0;
+    TRACKED_NAMES.forEach(name => {
+      const sp = byName[name];
+      const idx = NAME_TO_IDX[name];
+      if(sp && idx !== undefined && MARKET_DATA[idx]) {
+        const prev = MARKET_DATA[idx].price;
+        const newPrice = sp.min_price ?? sp.mean_price ?? prev;
+
+        if(newPrice && newPrice !== prev) {
+          MARKET_DATA[idx].h24 = parseFloat((((newPrice - prev) / prev) * 100).toFixed(2));
         }
-        // Volumen real de Steam
-        MARKET_DATA[item.idx].vol = data.volume ? `${data.volume} sold` : MARKET_DATA[item.idx].vol;
+        MARKET_DATA[idx].price  = newPrice || prev;
+        MARKET_DATA[idx].vol    = sp.quantity ? `${sp.quantity} listings` : MARKET_DATA[idx].vol;
         updated++;
       }
-      updateLoadingProgress(i + 1, TRACKED_ITEMS.length);
-    } catch(err) {
-      console.warn(`Steam error para "${item.steamName}":`, err.message);
+    });
+
+    lastFetch = Date.now();
+    apiStatus = updated > 0 ? 'success' : 'error';
+    setApiStatusUI(apiStatus);
+
+    if(updated > 0) {
+      buildMiniLists();
+      buildMarketTable();
+      updateTickerFromData();
+      showToast('✅', `${updated} precios actualizados desde Skinport`);
+    } else {
+      showToast('⚠️', 'Skinport no devolvió datos para los items trackeados');
     }
-    if(i < TRACKED_ITEMS.length - 1) await sleep(DELAY);
-  }
 
-  lastFetch = Date.now();
-  apiStatus = updated > 0 ? 'success' : 'error';
-  setApiStatusUI(apiStatus);
-
-  if(updated > 0) {
-    buildMiniLists();
-    buildMarketTable();
-    updateTickerFromData();
-    showToast('✅', `${updated} precios actualizados desde Steam`);
-  } else {
-    showToast('⚠️', 'No se pudieron obtener precios. Reintentá en un momento.');
+  } catch(err) {
+    console.error('Skinport error:', err);
+    apiStatus = 'error';
+    setApiStatusUI('error');
+    showToast('❌', `Error al conectar con Skinport: ${err.message}`);
   }
 }
 
@@ -2308,7 +2313,7 @@ async function fetchAllPrices() {
 function updateTickerFromData() {
   TICKER_ITEMS.forEach((t, i) => {
     const match = MARKET_DATA.find(m => m.name.includes(t.name.split(' ')[0]));
-    if(match) {
+    if(match && match.price) {
       TICKER_ITEMS[i].price = '$' + match.price.toFixed(2);
       TICKER_ITEMS[i].change = (match.h24 >= 0 ? '+' : '') + match.h24.toFixed(1) + '%';
       TICKER_ITEMS[i].up = match.h24 >= 0;
@@ -2325,14 +2330,14 @@ function setApiStatusUI(status) {
     btn.id = 'api-status-btn';
     btn.className = 'btn btn-ghost';
     btn.style.cssText = 'font-size:11px;padding:5px 10px;gap:5px;font-family:var(--font-mono)';
-    btn.onclick = fetchAllPrices;
+    btn.onclick = () => { lastFetch = 0; fetchAllPrices(); };
     document.querySelector('.nav-actions')?.prepend(btn);
   }
   const states = {
-    idle:    { icon:'◉', text:'Steam Prices', color:'var(--text3)' },
+    idle:    { icon:'◉', text:'Skinport', color:'var(--text3)' },
     loading: { icon:'⟳', text:'Cargando...', color:'var(--neon)' },
-    success: { icon:'●', text:'Steam LIVE', color:'var(--green)' },
-    error:   { icon:'✕', text:'Steam Error', color:'var(--red)' },
+    success: { icon:'●', text:'Skinport LIVE', color:'var(--green)' },
+    error:   { icon:'✕', text:'Skinport Error', color:'var(--red)' },
   };
   const s = states[status] || states.idle;
   btn.innerHTML = `<span style="color:${s.color}">${s.icon}</span> ${s.text}`;
@@ -2354,7 +2359,7 @@ function updateLoadingProgress(done, total) {
   }
   const pct = (done / total * 100).toFixed(0);
   document.getElementById('api-progress-fill').style.width = pct + '%';
-  if(done >= total) setTimeout(() => { bar.style.opacity='0'; setTimeout(()=>bar.remove(),500); }, 800);
+  if(done >= total) setTimeout(() => { bar.style.opacity='0'; setTimeout(()=>bar.remove(),500); }, 1000);
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
